@@ -1,0 +1,29 @@
+[application]
+
+[web]
+pre_compress = false
+
+[web.wasm_opt]
+level = "z"
+debug = false
+
+[web.app]
+
+
+# HTML title tag content
+title = "dioxus-app"
+
+# include `assets` in web platform
+[web.resource]
+
+# Additional CSS style files
+style = []
+
+# Additional JavaScript files
+script = []
+
+[web.resource.dev]
+
+# Javascript code file
+# serve: [dev-server] only
+script = []
