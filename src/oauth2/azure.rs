@@ -97,7 +97,7 @@ impl AuthorizationCodeFlowWithPKCE {
             tenant_id = self.security_tenant_id
         );
 
-        // microsoft encoding is obsolete
+        // microsoft encoding
         let response_type = { if self.hybrid_flow { "code%20id_token" } else { "code" } };
         let response_mode = { if self.hybrid_flow { "fragment" } else { "query" } };
 
