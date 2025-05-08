@@ -7,14 +7,8 @@ pub fn SecurityLayout() -> Element {
     let oauth2_client = use_context_provider(|| {
         let client = oauth2::azure::AuthorizationCodeFlowWithPKCE::default()
             .with_client_id("00000000-0000-0000-0000-000000000000")
-            .with_audience("api://00000000-0000-0000-0000-000000000000/access")
-            .with_token_url("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token")
-            .with_authorize_url("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize")
-            .with_issuers_urls(&[
-                "https://sts.windows.net/{tenant_id}/",
-                "https://login.microsoftonline.com/{tenant_id}/v2.0",
-            ])
-            .with_keys_url("https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys")
+            .with_scope("api://00000000-0000-0000-0000-000000000000/access")
+            .with_oidc_url("https://login.microsoftonline.com/{tenant_id}/v2.0/.well-known/openid-configuration")
             .with_hybrid_flow()
             .with_session_storage();
 

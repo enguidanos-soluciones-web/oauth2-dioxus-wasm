@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use dioxus::logger::tracing;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -9,11 +10,11 @@ use url::form_urlencoded;
 use web_sys::UrlSearchParams;
 
 use crate::oauth2::csrf;
+use crate::oauth2::oidc;
 use crate::oauth2::params::Params;
 use crate::oauth2::pkce;
 use crate::oauth2::storage;
 use crate::oauth2::token;
-use crate::oauth2::token::TokenVerifier;
 
 #[derive(Default, Debug, Clone)]
 pub struct AuthorizationCodeFlowWithPKCE {
@@ -21,34 +22,14 @@ pub struct AuthorizationCodeFlowWithPKCE {
 
     hybrid_flow: bool,
     persistence: storage::StorageType,
-
-    token_url: &'static str,
-    authorize_url: &'static str,
-    issuers_urls: &'static [&'static str],
-    keys_url: &'static str,
-
+    oidc_url: &'static str,
     client_id: &'static str,
-    audience: &'static str,
+    scope: &'static str,
 }
 
 impl AuthorizationCodeFlowWithPKCE {
-    pub fn with_token_url(mut self, s: &'static str) -> Self {
-        self.token_url = s;
-        self
-    }
-
-    pub fn with_authorize_url(mut self, s: &'static str) -> Self {
-        self.authorize_url = s;
-        self
-    }
-
-    pub fn with_issuers_urls(mut self, s: &'static [&'static str]) -> Self {
-        self.issuers_urls = s;
-        self
-    }
-
-    pub fn with_keys_url(mut self, s: &'static str) -> Self {
-        self.keys_url = s;
+    pub fn with_oidc_url(mut self, s: &'static str) -> Self {
+        self.oidc_url = s;
         self
     }
 
@@ -57,13 +38,8 @@ impl AuthorizationCodeFlowWithPKCE {
         self
     }
 
-    pub fn with_audience(mut self, s: &'static str) -> Self {
-        self.audience = s;
-        self
-    }
-
-    pub fn with_local_storage(mut self) -> Self {
-        self.persistence = storage::StorageType::LocalStorage;
+    pub fn with_scope(mut self, s: &'static str) -> Self {
+        self.scope = s;
         self
     }
 
@@ -77,7 +53,7 @@ impl AuthorizationCodeFlowWithPKCE {
         self
     }
 
-    fn build_authorize_endpoint(&self) -> anyhow::Result<String> {
+    fn build_authorize_endpoint(&self, oidc_conf: &oidc::Configuration) -> anyhow::Result<String> {
         let Some(window) = web_sys::window() else {
             anyhow::bail!("window not available");
         };
@@ -102,9 +78,9 @@ impl AuthorizationCodeFlowWithPKCE {
 
         let scope = {
             if self.hybrid_flow {
-                format!("openid%20{audience}", audience = self.audience)
+                format!("openid%20{}", self.scope)
             } else {
-                self.audience.to_owned()
+                self.scope.to_owned()
             }
         };
 
@@ -121,7 +97,7 @@ impl AuthorizationCodeFlowWithPKCE {
             params.push((Params::Nonce.to_string(), csrf_nonce.as_str()));
         }
 
-        let mut base_url = Url::parse(self.authorize_url)?;
+        let mut base_url = Url::parse(&oidc_conf.authorization_endpoint)?;
 
         for (key, value) in params.iter() {
             base_url.query_pairs_mut().append_pair(key, value);
@@ -135,7 +111,12 @@ impl AuthorizationCodeFlowWithPKCE {
         ))
     }
 
-    async fn request_authorization_token(&self, code: &str, state: &str) -> anyhow::Result<token::TokenResponse> {
+    async fn request_authorization_token(
+        &self,
+        oidc_conf: &oidc::Configuration,
+        code: &str,
+        state: &str,
+    ) -> anyhow::Result<token::TokenResponse> {
         let Some(window) = web_sys::window() else {
             anyhow::bail!("window not available");
         };
@@ -148,7 +129,7 @@ impl AuthorizationCodeFlowWithPKCE {
 
         let params_raw = &[
             (Params::ClientId.to_string(), self.client_id),
-            (Params::Scope.to_string(), self.audience),
+            (Params::Scope.to_string(), self.scope),
             (Params::Code.to_string(), code),
             (Params::RedirectUri.to_string(), redirect_uri.as_str()),
             (Params::GrantType.to_string(), "authorization_code"),
@@ -164,7 +145,7 @@ impl AuthorizationCodeFlowWithPKCE {
         let client = reqwest::Client::new();
 
         let response = client
-            .post(self.token_url)
+            .post(&oidc_conf.token_endpoint)
             .form(&params)
             .send()
             .await?
@@ -247,10 +228,12 @@ impl AuthorizationCodeFlowWithPKCE {
             anyhow::bail!("window not available");
         };
 
+        let oidc_conf = oidc::Configuration::from_remote(self.oidc_url).await?;
+
         let (code, id_token, state) = self.extract_auth_params_from_url()?;
 
         let Some(code) = code else {
-            let endpoint_url = self.build_authorize_endpoint()?;
+            let endpoint_url = self.build_authorize_endpoint(&oidc_conf)?;
 
             window
                 .location()
@@ -287,7 +270,7 @@ impl AuthorizationCodeFlowWithPKCE {
                 anyhow::bail!("param id_token not available");
             };
 
-            let id_token_parts = token::IdToken::verify(self.client_id, self.issuers_urls, self.keys_url, &id_token).await?;
+            let id_token_parts = token::IdToken::from_str(&id_token).map_err(|err| anyhow!("{err:?}"))?;
 
             if !csrf::Nonce::exists_and_matches_raw(self.persistence, &id_token_parts.nonce) {
                 self.clear_all()?;
@@ -303,7 +286,7 @@ impl AuthorizationCodeFlowWithPKCE {
             future_id_token = Some(id_token);
         }
 
-        let mut token_response = self.request_authorization_token(&code, &state).await?;
+        let mut token_response = self.request_authorization_token(&oidc_conf, &code, &state).await?;
         token_response.id_token = future_id_token;
         token_response.persist(self.persistence)?;
 
@@ -332,7 +315,7 @@ impl AuthorizationCodeFlowWithPKCE {
 
             let params_raw = &[
                 (Params::ClientId.to_string(), self.client_id),
-                (Params::Scope.to_string(), self.audience),
+                (Params::Scope.to_string(), self.scope),
                 (Params::RefreshToken.to_string(), &token_response.refresh_token),
                 (Params::RedirectUri.to_string(), redirect_uri.as_str()),
                 (Params::GrantType.to_string(), "refresh_token"),
@@ -343,7 +326,9 @@ impl AuthorizationCodeFlowWithPKCE {
                 params.insert(k, v);
             }
 
-            let response = client.post(self.token_url).form(&params).send().await?;
+            let oidc_conf = oidc::Configuration::from_remote(self.oidc_url).await?;
+
+            let response = client.post(&oidc_conf.token_endpoint).form(&params).send().await?;
 
             match response.error_for_status() {
                 Ok(out) => {
