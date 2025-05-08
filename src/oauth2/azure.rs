@@ -1,10 +1,6 @@
 use anyhow::anyhow;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dioxus::logger::tracing;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -17,60 +13,68 @@ use crate::oauth2::params::Params;
 use crate::oauth2::pkce;
 use crate::oauth2::storage;
 use crate::oauth2::token;
+use crate::oauth2::token::TokenVerifier;
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct AzureIdToken {
-    pub sub: String,
-    pub nonce: String,
-}
-
-impl FromStr for AzureIdToken {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let Some(parts) = s.split('.').nth(1) else {
-            return Err("cant extract jwt parts".to_owned());
-        };
-
-        let decoded_parts = URL_SAFE_NO_PAD.decode(parts.as_bytes()).map_err(|e| e.to_string())?;
-        let serialized = String::from_utf8(decoded_parts).map_err(|e| e.to_string())?;
-        serde_json::from_str::<Self>(&serialized).map_err(|e| e.to_string())
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct AuthorizationCodeFlowWithPKCE {
     pub is_authenticated: Arc<AtomicBool>,
 
     hybrid_flow: bool,
     persistence: storage::StorageType,
-    security_client_id: &'static str,
-    security_tenant_id: &'static str,
-    security_audience_id: &'static str,
+
+    token_url: &'static str,
+    authorize_url: &'static str,
+    issuers_urls: &'static [&'static str],
+    keys_url: &'static str,
+
+    client_id: &'static str,
+    audience: &'static str,
 }
 
 impl AuthorizationCodeFlowWithPKCE {
-    pub fn new(security_client_id: &'static str, security_tenant_id: &'static str, security_audience_id: &'static str) -> Self {
-        Self {
-            hybrid_flow: false,
-            persistence: storage::StorageType::LocalStorage,
-            is_authenticated: Arc::new(AtomicBool::new(false)),
-            security_client_id,
-            security_tenant_id,
-            security_audience_id,
-        }
+    pub fn with_token_url(mut self, s: &'static str) -> Self {
+        self.token_url = s;
+        self
     }
 
-    pub fn with_local_storage(&mut self) {
+    pub fn with_authorize_url(mut self, s: &'static str) -> Self {
+        self.authorize_url = s;
+        self
+    }
+
+    pub fn with_issuers_urls(mut self, s: &'static [&'static str]) -> Self {
+        self.issuers_urls = s;
+        self
+    }
+
+    pub fn with_keys_url(mut self, s: &'static str) -> Self {
+        self.keys_url = s;
+        self
+    }
+
+    pub fn with_client_id(mut self, s: &'static str) -> Self {
+        self.client_id = s;
+        self
+    }
+
+    pub fn with_audience(mut self, s: &'static str) -> Self {
+        self.audience = s;
+        self
+    }
+
+    pub fn with_local_storage(mut self) -> Self {
         self.persistence = storage::StorageType::LocalStorage;
+        self
     }
 
-    pub fn with_session_storage(&mut self) {
+    pub fn with_session_storage(mut self) -> Self {
         self.persistence = storage::StorageType::SessionStorage;
+        self
     }
 
-    pub fn with_hybrid_flow(&mut self) {
+    pub fn with_hybrid_flow(mut self) -> Self {
         self.hybrid_flow = true;
+        self
     }
 
     fn build_authorize_endpoint(&self) -> anyhow::Result<String> {
@@ -92,25 +96,20 @@ impl AuthorizationCodeFlowWithPKCE {
         pkce_code_verifier.persist(self.persistence)?;
         let pkce_code_challenge = pkce::CodeChallenge::from(&pkce_code_verifier);
 
-        let base_url = &format!(
-            "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize",
-            tenant_id = self.security_tenant_id
-        );
-
         // microsoft encoding
         let response_type = { if self.hybrid_flow { "code%20id_token" } else { "code" } };
         let response_mode = { if self.hybrid_flow { "fragment" } else { "query" } };
 
         let scope = {
             if self.hybrid_flow {
-                format!("openid%20{audience}", audience = self.security_audience_id)
+                format!("openid%20{audience}", audience = self.audience)
             } else {
-                self.security_audience_id.to_owned()
+                self.audience.to_owned()
             }
         };
 
         let mut params = vec![
-            (Params::ClientId.to_string(), self.security_client_id),
+            (Params::ClientId.to_string(), self.client_id),
             (Params::RedirectUri.to_string(), redirect_uri.as_str()),
             (Params::ResponseMode.to_string(), response_mode),
             (Params::State.to_string(), csrf_state.as_str()),
@@ -122,7 +121,7 @@ impl AuthorizationCodeFlowWithPKCE {
             params.push((Params::Nonce.to_string(), csrf_nonce.as_str()));
         }
 
-        let mut base_url = Url::parse(base_url)?;
+        let mut base_url = Url::parse(self.authorize_url)?;
 
         for (key, value) in params.iter() {
             base_url.query_pairs_mut().append_pair(key, value);
@@ -148,8 +147,8 @@ impl AuthorizationCodeFlowWithPKCE {
         let code_verifier = pkce::CodeVerifier::retrieve(self.persistence)?;
 
         let params_raw = &[
-            (Params::ClientId.to_string(), self.security_client_id),
-            (Params::Scope.to_string(), self.security_audience_id),
+            (Params::ClientId.to_string(), self.client_id),
+            (Params::Scope.to_string(), self.audience),
             (Params::Code.to_string(), code),
             (Params::RedirectUri.to_string(), redirect_uri.as_str()),
             (Params::GrantType.to_string(), "authorization_code"),
@@ -165,10 +164,7 @@ impl AuthorizationCodeFlowWithPKCE {
         let client = reqwest::Client::new();
 
         let response = client
-            .post(format!(
-                "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
-                tenant_id = self.security_tenant_id
-            ))
+            .post(self.token_url)
             .form(&params)
             .send()
             .await?
@@ -291,7 +287,7 @@ impl AuthorizationCodeFlowWithPKCE {
                 anyhow::bail!("param id_token not available");
             };
 
-            let id_token_parts = AzureIdToken::from_str(&id_token).map_err(|err| anyhow!("{err:?}"))?;
+            let id_token_parts = token::IdToken::verify(self.client_id, self.issuers_urls, self.keys_url, &id_token).await?;
 
             if !csrf::Nonce::exists_and_matches_raw(self.persistence, &id_token_parts.nonce) {
                 self.clear_all()?;
@@ -335,8 +331,8 @@ impl AuthorizationCodeFlowWithPKCE {
             let client = reqwest::Client::new();
 
             let params_raw = &[
-                (Params::ClientId.to_string(), self.security_client_id),
-                (Params::Scope.to_string(), self.security_audience_id),
+                (Params::ClientId.to_string(), self.client_id),
+                (Params::Scope.to_string(), self.audience),
                 (Params::RefreshToken.to_string(), &token_response.refresh_token),
                 (Params::RedirectUri.to_string(), redirect_uri.as_str()),
                 (Params::GrantType.to_string(), "refresh_token"),
@@ -347,14 +343,7 @@ impl AuthorizationCodeFlowWithPKCE {
                 params.insert(k, v);
             }
 
-            let response = client
-                .post(format!(
-                    "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
-                    tenant_id = self.security_tenant_id
-                ))
-                .form(&params)
-                .send()
-                .await?;
+            let response = client.post(self.token_url).form(&params).send().await?;
 
             match response.error_for_status() {
                 Ok(out) => {

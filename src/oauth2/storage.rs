@@ -5,6 +5,12 @@ pub enum StorageType {
     SessionStorage,
 }
 
+impl Default for StorageType {
+    fn default() -> Self {
+        Self::LocalStorage
+    }
+}
+
 pub fn local_storage() -> Option<web_sys::Storage> {
     if let Some(window) = web_sys::window() {
         if let Ok(storage) = window.local_storage() {

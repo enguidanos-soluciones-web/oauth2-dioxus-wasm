@@ -1,9 +1,76 @@
-use serde::{Deserialize, Serialize};
+use dioxus::logger::tracing;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::storage;
 
 const TOKEN_RESPONSE_KEY: &str = "oauth_token_response";
 const TOKEN_RESPONSE_EXPIRATION_KEY: &str = "oauth_token_response_expiration";
+
+pub trait TokenVerifier<T>
+where
+    T: DeserializeOwned,
+{
+    async fn verify(
+        client_id: &'static str,
+        issuers_urls: &'static [&'static str],
+        keys_url: &'static str,
+        s: &str,
+    ) -> anyhow::Result<T> {
+        let header = jsonwebtoken::decode_header(s)?;
+
+        let Some(kid) = header.kid else {
+            anyhow::bail!("kid not found");
+        };
+
+        let Some(jwkset) = Self::fetch_jkwset(keys_url).await else {
+            anyhow::bail!("jkwset not fetched");
+        };
+
+        let Some(jwk) = jwkset.find(&kid) else {
+            anyhow::bail!("kid not found");
+        };
+
+        return match jwk.algorithm {
+            jsonwebtoken::jwk::AlgorithmParameters::RSA(ref rsa) => {
+                let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+                validation.set_issuer(issuers_urls);
+                validation.set_audience(&[client_id]);
+
+                let decoding_key = jsonwebtoken::DecodingKey::from_rsa_components(&rsa.n, &rsa.e)?;
+
+                let jsonwebtoken::TokenData { claims, .. } = jsonwebtoken::decode::<T>(s, &decoding_key, &validation)?;
+
+                Ok(claims)
+            }
+            _ => anyhow::bail!("invalid algorithm on token"),
+        };
+    }
+
+    // TODO: implement cache on storage for 12h
+    async fn fetch_jkwset(keys_url: &'static str) -> Option<jsonwebtoken::jwk::JwkSet> {
+        let client = reqwest::Client::new();
+
+        let Ok(response) = client.get(keys_url).send().await else {
+            tracing::error!("impossible to request to jwk_keys_url");
+            return None;
+        };
+
+        let Ok(jwkset) = response.json::<jsonwebtoken::jwk::JwkSet>().await else {
+            tracing::error!("impossible to extract jwk_set");
+            return None;
+        };
+
+        return Some(jwkset);
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct IdToken {
+    pub sub: String,
+    pub nonce: String,
+}
+
+impl TokenVerifier<IdToken> for IdToken {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenResponse {

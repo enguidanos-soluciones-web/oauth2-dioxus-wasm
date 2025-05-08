@@ -1,5 +1,14 @@
 # Wasm APP with Azure OAUTH2.0 Authorization Code Flow with PKCE and Hybrid Flow
 
+### MacOS
+
+```
+brew install llvm
+echo 'export PATH="/opt/homebrew/opt/llvm/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+llvm-config --version
+```
+
 ### Serving App
 
 ```bash
@@ -23,14 +32,18 @@ use std::sync::{Arc, atomic::Ordering};
 #[component]
 pub fn SecurityLayout() -> Element {
     let oauth2_client = use_context_provider(|| {
-        let mut client = oauth2::azure::AuthorizationCodeFlowWithPKCE::new(
-            "00000000-0000-0000-0000-000000000000",              // client_id
-            "00000000-0000-0000-0000-000000000000",              // tenant_id
-            "api://00000000-0000-0000-0000-000000000000/access", // audience
-        );
-
-        client.with_hybrid_flow();
-        client.with_session_storage();
+        let client = oauth2::azure::AuthorizationCodeFlowWithPKCE::default()
+            .with_client_id("00000000-0000-0000-0000-000000000000")
+            .with_audience("api://00000000-0000-0000-0000-000000000000/access")
+            .with_token_url("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token")
+            .with_authorize_url("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize")
+            .with_issuers_urls(&[
+                "https://sts.windows.net/{tenant_id}/",
+                "https://login.microsoftonline.com/{tenant_id}/v2.0"
+            ])
+            .with_keys_url("https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys")
+            .with_hybrid_flow()
+            .with_session_storage();
 
         Arc::new(client)
     });
