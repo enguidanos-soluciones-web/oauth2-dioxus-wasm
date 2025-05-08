@@ -1,4 +1,5 @@
-use rand::Rng;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand::RngCore;
 
 use crate::oauth2::storage;
 
@@ -12,10 +13,11 @@ pub struct State {
 
 impl State {
     pub fn new() -> Self {
-        let random: f64 = rand::rng().random();
+        let mut buffer = [0u8; 12];
+        rand::rng().fill_bytes(&mut buffer);
 
         Self {
-            value: format!("{random}"),
+            value: URL_SAFE_NO_PAD.encode(buffer),
         }
     }
 
@@ -107,10 +109,11 @@ pub struct Nonce {
 
 impl Nonce {
     pub fn new() -> Self {
-        let random: f64 = rand::rng().random();
+        let mut buffer = [0u8; 12];
+        rand::rng().fill_bytes(&mut buffer);
 
         Self {
-            value: format!("{random}"),
+            value: URL_SAFE_NO_PAD.encode(buffer),
         }
     }
 
